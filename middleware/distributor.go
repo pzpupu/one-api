@@ -58,32 +58,37 @@ func Distribute() func(c *gin.Context) {
 		} else {
 			// Select a channel for the user
 			var modelRequest ModelRequest
-			err := common.UnmarshalBodyReusable(c, &modelRequest)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"error": gin.H{
-						"message": "无效的请求",
-						"type":    "one_api_error",
-					},
-				})
-				c.Abort()
-				return
-			}
-			if strings.HasPrefix(c.Request.URL.Path, "/v1/moderations") {
-				if modelRequest.Model == "" {
-					modelRequest.Model = "text-moderation-stable"
+			if strings.HasPrefix(c.Request.URL.Path, "/v1/audio") {
+				modelRequest.Model = "whisper-1"
+			} else {
+				err := common.UnmarshalBodyReusable(c, &modelRequest)
+				if err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{
+						"error": gin.H{
+							"message": "无效的请求",
+							"type":    "one_api_error",
+						},
+					})
+					c.Abort()
+					return
+				}
+				if strings.HasPrefix(c.Request.URL.Path, "/v1/moderations") {
+					if modelRequest.Model == "" {
+						modelRequest.Model = "text-moderation-stable"
+					}
+				}
+				if strings.HasSuffix(c.Request.URL.Path, "embeddings") {
+					if modelRequest.Model == "" {
+						modelRequest.Model = c.Param("model")
+					}
+				}
+				if strings.HasPrefix(c.Request.URL.Path, "/v1/images/generations") {
+					if modelRequest.Model == "" {
+						modelRequest.Model = "dall-e"
+					}
 				}
 			}
-			if strings.HasSuffix(c.Request.URL.Path, "embeddings") {
-				if modelRequest.Model == "" {
-					modelRequest.Model = c.Param("model")
-				}
-			}
-			if strings.HasPrefix(c.Request.URL.Path, "/v1/images/generations") {
-				if modelRequest.Model == "" {
-					modelRequest.Model = "dall-e"
-				}
-			}
+			var err error
 			channel, err = model.CacheGetRandomSatisfiedChannel(userGroup, modelRequest.Model)
 			if err != nil {
 				message := fmt.Sprintf("当前分组 %s 下对于模型 %s 无可用渠道", userGroup, modelRequest.Model)

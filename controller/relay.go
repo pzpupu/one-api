@@ -1,13 +1,18 @@
 package controller
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"github.com/gin-gonic/gin"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"one-api/common"
+	"one-api/model"
 	"strconv"
 	"strings"
-
-	"github.com/gin-gonic/gin"
+	"time"
 )
 
 type Message struct {
@@ -141,6 +146,15 @@ type CompletionsStreamResponse struct {
 	} `json:"choices"`
 }
 
+type AudioTranscriptionsRequest struct {
+	File           *multipart.FileHeader `form:"file" binding:"required"`
+	Model          string                `form:"model" binding:"required"`
+	Prompt         string                `form:"prompt"`
+	ResponseFormat string                `form:"response_format"`
+	Temperature    float64               `form:"temperature"`
+	Language       string                `form:"language"`
+}
+
 func Relay(c *gin.Context) {
 	relayMode := RelayModeUnknown
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/chat/completions") {
@@ -190,6 +204,234 @@ func Relay(c *gin.Context) {
 			disableChannel(channelId, channelName, err.Message)
 		}
 	}
+}
+
+func RelayAudio(c *gin.Context) {
+	var form AudioTranscriptionsRequest
+	// 在这种情况下，将自动选择合适的绑定
+	if c.ShouldBind(&form) != nil {
+		err := OpenAIError{
+			Message: "bind_form_failed",
+			Type:    "one_api_error",
+			Param:   "",
+			Code:    "audio_error",
+		}
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err,
+		})
+		return
+	}
+	file, err := form.File.Open()
+	if err != nil {
+		err := OpenAIError{
+			Message: "Open file error",
+			Type:    "one_api_error",
+			Param:   "",
+			Code:    "audio_error",
+		}
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err,
+		})
+		return
+	}
+	defer file.Close()
+	var header common.WAVHeader
+	err = binary.Read(file, binary.LittleEndian, &header)
+	if err != nil {
+		err := OpenAIError{
+			Message: "Read file error",
+			Type:    "one_api_error",
+			Param:   "",
+			Code:    "audio_error",
+		}
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err,
+		})
+		return
+	}
+
+	if !bytes.Equal(header.RIFF[:], []byte("RIFF")) || !bytes.Equal(header.WAVE[:], []byte("WAVE")) {
+		err := OpenAIError{
+			Message: "Not a valid WAV file",
+			Type:    "one_api_error",
+			Param:   "",
+			Code:    "audio_error",
+		}
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err,
+		})
+		return
+	}
+
+	duration := time.Duration(header.DataSize/header.ByteRate) * time.Second
+
+	channelType := c.GetInt("channel")
+	baseURL := common.ChannelBaseURLs[channelType]
+	requestURL := c.Request.URL.String()
+	if c.GetString("base_url") != "" {
+		baseURL = c.GetString("base_url")
+	}
+	fullRequestURL := fmt.Sprintf("%s%s", baseURL, requestURL)
+
+	// 创建一个缓冲区，用于存储请求体
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	// 创建multipart/form-data的一部分，其中包含文件内容
+	part, err := writer.CreateFormFile("file", form.File.Filename)
+	if err != nil {
+		err := OpenAIError{
+			Message: "create_form_file_failed",
+			Type:    "one_api_error",
+			Param:   "",
+			Code:    "audio_error",
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err,
+		})
+		return
+	}
+	// 将文件内容拷贝到 multipart writer
+	// 重置文件读取偏移量
+	_, _ = file.Seek(0, 0)
+	_, err = io.Copy(part, file)
+	_ = writer.WriteField("model", form.Model)
+	_ = writer.WriteField("prompt", form.Prompt)
+	_ = writer.WriteField("response_format", form.ResponseFormat)
+	_ = writer.WriteField("temperature", strconv.FormatFloat(form.Temperature, 'f', -1, 64))
+	_ = writer.WriteField("language", form.Language)
+	// 结束 multipart 写操作
+	_ = writer.Close()
+	req, err := http.NewRequest(c.Request.Method, fullRequestURL, body)
+	if err != nil {
+		err := OpenAIError{
+			Message: "new_request_failed",
+			Type:    "one_api_error",
+			Param:   "",
+			Code:    "audio_error",
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err,
+		})
+		return
+	}
+
+	req.Header.Set("Authorization", c.Request.Header.Get("Authorization"))
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Accept", c.Request.Header.Get("Accept"))
+
+	//reqDump, err := httputil.DumpRequestOut(req, true)
+	//fmt.Printf("REQUEST:\n%s", string(reqDump))
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		err := OpenAIError{
+			Message: "do_request_failed",
+			Type:    "one_api_error",
+			Param:   "",
+			Code:    "audio_error",
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err,
+		})
+		return
+	}
+
+	defer func() {
+		if resp.StatusCode == 200 {
+			// 计费
+			QuotaPerUnit := common.QuotaPerUnit
+			// 语音模型倍率(每分钟需要消耗的额度)
+			m := QuotaPerUnit * 0.006
+			// 每秒需要消耗的额度
+			s := m / 60
+			// 本次请求消耗的额度
+			quota := int(duration.Seconds() * s)
+			tokenId := c.GetInt("token_id")
+			userId := c.GetInt("id")
+			group := c.GetString("group")
+			imageModel := "whisper-1"
+			modelRatio := common.GetModelRatio(imageModel)
+			groupRatio := common.GetGroupRatio(group)
+
+			err := model.PostConsumeTokenQuota(tokenId, quota)
+			if err != nil {
+				common.SysError("error consuming token remain quota: " + err.Error())
+			}
+			err = model.CacheUpdateUserQuota(userId)
+			if err != nil {
+				common.SysError("error update user quota cache: " + err.Error())
+			}
+			if quota != 0 {
+				tokenName := c.GetString("token_name")
+				logContent := fmt.Sprintf("模型倍率 %.2f，分组倍率 %.2f", modelRatio, groupRatio)
+				model.RecordConsumeLog(userId, 0, 0, imageModel, tokenName, quota, logContent)
+				model.UpdateUserUsedQuotaAndRequestCount(userId, quota)
+				channelId := c.GetInt("channel_id")
+				model.UpdateChannelUsedQuota(channelId, quota)
+			}
+		}
+	}()
+
+	err = req.Body.Close()
+	if err != nil {
+		err := OpenAIError{
+			Message: "close_request_body_failed",
+			Type:    "one_api_error",
+			Param:   "",
+			Code:    "audio_error",
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err,
+		})
+		return
+	}
+	err = c.Request.Body.Close()
+	if err != nil {
+		err := OpenAIError{
+			Message: "close_request_body_failed",
+			Type:    "one_api_error",
+			Param:   "",
+			Code:    "audio_error",
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err,
+		})
+		return
+	}
+
+	for k, v := range resp.Header {
+		c.Writer.Header().Set(k, v[0])
+	}
+	c.Writer.WriteHeader(resp.StatusCode)
+
+	_, err = io.Copy(c.Writer, resp.Body)
+	if err != nil {
+		err := OpenAIError{
+			Message: "copy_response_body_failed",
+			Type:    "one_api_error",
+			Param:   "",
+			Code:    "audio_error",
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err,
+		})
+		return
+	}
+	err = resp.Body.Close()
+	if err != nil {
+		err := OpenAIError{
+			Message: "close_response_body_failed",
+			Type:    "one_api_error",
+			Param:   "",
+			Code:    "audio_error",
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err,
+		})
+		return
+	}
+
 }
 
 func RelayNotImplemented(c *gin.Context) {

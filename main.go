@@ -24,7 +24,7 @@ func main() {
 	common.SetupGinLog()
 	common.SysLog("One API " + common.Version + " started")
 	if os.Getenv("GIN_MODE") != "debug" {
-		gin.SetMode(gin.ReleaseMode)
+		gin.SetMode(gin.DebugMode)
 	}
 	// Initialize SQL Database
 	err := model.InitDB()
