@@ -12,7 +12,6 @@ import (
 	"one-api/model"
 	"strconv"
 	"strings"
-	"time"
 )
 
 type Message struct {
@@ -250,20 +249,14 @@ func RelayAudio(c *gin.Context) {
 		return
 	}
 
+	var duration float64
 	if !bytes.Equal(header.RIFF[:], []byte("RIFF")) || !bytes.Equal(header.WAVE[:], []byte("WAVE")) {
-		err := OpenAIError{
-			Message: "Not a valid WAV file",
-			Type:    "one_api_error",
-			Param:   "",
-			Code:    "audio_error",
-		}
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": err,
-		})
-		return
+		// 如果不能解析为wav文件，则使用默认配置
+		// wav 一般Byte Rate为:16000
+		duration = float64(form.File.Size) / 16000
+	} else {
+		duration = float64(header.DataSize) / float64(header.ByteRate)
 	}
-
-	duration := time.Duration(header.DataSize/header.ByteRate) * time.Second
 
 	channelType := c.GetInt("channel")
 	baseURL := common.ChannelBaseURLs[channelType]
@@ -346,7 +339,7 @@ func RelayAudio(c *gin.Context) {
 			// 每秒需要消耗的额度
 			s := m / 60
 			// 本次请求消耗的额度
-			quota := int(duration.Seconds() * s)
+			quota := int(duration * s)
 			tokenId := c.GetInt("token_id")
 			userId := c.GetInt("id")
 			group := c.GetString("group")
