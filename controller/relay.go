@@ -318,10 +318,11 @@ func RelayAudio(c *gin.Context) {
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		common.SysLog("RelayAudio do_request_failed " + err.Error())
 		err := OpenAIError{
 			Message: "do_request_failed",
 			Type:    "one_api_error",
-			Param:   "",
+			Param:   err.Error(),
 			Code:    "audio_error",
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
