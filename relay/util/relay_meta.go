@@ -42,7 +42,7 @@ func GetRelayMeta(c *gin.Context) *RelayMeta {
 		APIVersion:     c.GetString(common.ConfigKeyAPIVersion),
 		APIKey:         strings.TrimPrefix(c.Request.Header.Get("Authorization"), "Bearer "),
 		Config:         nil,
-		RequestURLPath: c.Request.URL.String(),
+		RequestURLPath: c.Request.URL.Path,
 	}
 	if meta.ChannelType == common.ChannelTypeAzure {
 		meta.APIVersion = GetAzureAPIVersion(c)
